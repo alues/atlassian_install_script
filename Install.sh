@@ -4,30 +4,36 @@ cur_path=`cd "$(dirname "$0")"; pwd`
 cur_sys=`cat /etc/*-release | sed -r "s/^ID=(.*)$/\\1/;tA;d;:A;s/^\"(.*)\"$/\\1/" | tr -d '\n'`
 cur_pkg_path=${cur_path}/pkg
 
-# Stop the script when any Error occur
+# Stop the script when any errors occur
 set -e
 
 # Software version env
-BITBUCKET_VERSION=6.3.2
+BITBUCKET_VERSION=6.4.0
 
+# Atlassian software install root path
 INSTALL_ROOT=/opt/atlassian
-JAVA_AGENT_OPT=/opt/atlassian/atlassian-agent.jar
+
+# Atlassian agent config path
+JAVA_AGENT_OPT=${INSTALL_ROOT}/atlassian-agent.jar
+
+# 
 RUNTIME_DATA_ROOT=/var/atlassian/application-data
 
 # Domain setting
 MAIN_DOMAIN=exmaple.com
+MAIN_DOMAIN_PORT=${MAIN_DOMAIN_PORT:-80}
 SUBDOMAIN_CROWD=sso.${MAIN_DOMAIN}
-SUBDOMAIN_CROWD_PORT=80
+SUBDOMAIN_CROWD_PORT=${MAIN_DOMAIN_PORT}
 SUBDOMAIN_JIRA=flow.${MAIN_DOMAIN}
-SUBDOMAIN_JIRA_PORT=80
+SUBDOMAIN_JIRA_PORT=${MAIN_DOMAIN_PORT}
 SUBDOMAIN_CONFLUENCE=doc.${MAIN_DOMAIN}
-SUBDOMAIN_CONFLUENCE_PORT=80
+SUBDOMAIN_CONFLUENCE_PORT=${MAIN_DOMAIN_PORT}
 SUBDOMAIN_BITBUCKET=git.${MAIN_DOMAIN}
-SUBDOMAIN_BITBUCKET_PORT=80
+SUBDOMAIN_BITBUCKET_PORT=${MAIN_DOMAIN_PORT}
 
 # SSO setting
-SSO_APPLICATION_NAME=sso
-SSO_APPLICATION_PASSWORD="password"
+SSO_APPLICATION_NAME=${SSO_APPLICATION_NAME:-sso}
+SSO_APPLICATION_PASSWORD=${SSO_APPLICATION_PASSWORD:-password}
 SSO_DOMAIN=${SUBDOMAIN_CROWD}
 # SSO_DOMAIN=localhost:8095
 SSO_BASE_URL=http://${SSO_DOMAIN}/crowd/
@@ -71,6 +77,18 @@ function print_info() {
     printf "[${_color_blue} ${_tmp_status} ${_color_wipe}] ${1}\n"
 }
 
+function get_target_path() {
+    # detect target in spcial path
+    # ${1} search path
+    # ${2} target
+    _tmp_list=(`find ${1} -name ${2}`)
+    if [[ ${#_tmp_list[@]} == 0 ]]; then
+        print_err "jre unavailable to found in \`${1}\`"
+        exit 1
+    fi
+    printf ${_tmp_list[0]}
+}
+
 function backup_check() {
     # ${1} file path
     # ${2} force replace
@@ -82,10 +100,27 @@ function backup_check() {
 
 function parse_run_method() {
     print_info "parsing enrty"
-    _tmp_list=(`ls /opt/atlassian`)
+    _tmp_list=(
+        install
+        generate_lic
+    )
 
-    for ((i=1; i<=${#var_list[@]}; i++)); do
-        print_info ${i}
+    print_info "please select function"
+    select _v in ${_tmp_list[@]}; do
+        case ${_v} in
+            "install")
+                install
+                break
+            ;;
+            "generate_lic")
+                generate_lic
+                break
+            ;;
+            *)
+                print_err "unsoprt function id"
+                print_info "please select function"
+            ;;
+        esac
     done
 }
 
@@ -125,9 +160,21 @@ function init_java_agent() {
         backup_check ${_tmp_root}
 
         print_info "\`${_tmp_root}\` patching"
-        awk -v JAVA_AGENT_OPT=${JAVA_AGENT_OPT} \
-        'BEGIN{ mark=0; mark_ready=0; mark_NR=0 }/^JAVA_OPTS/{ mark++; mark_NR=NR-mark_NR }{if(mark>0 && mark_ready==0){ mark_ready++; printf "%s\nJAVA_OPTS=\"-javaagent:%s ${JAVA_OPTS}\"\n", $0, JAVA_AGENT_OPT }else if(mark>0 && mark_NR==1){ mark=0 }else{ print }}END{if(mark_ready==0){ printf "export JAVA_OPTS=\"-javaagent:%s ${JAVA_OPTS}\"\n", JAVA_AGENT_OPT }}' \
-        ${_tmp_root}.bak > ${_tmp_root}
+        awk -v JAVA_AGENT_OPT=${JAVA_AGENT_OPT} '
+        BEGIN{ mark=0; mark_ready=0; mark_NR=0 }
+        /^JAVA_OPTS/{ mark++; mark_NR=NR-mark_NR }
+        {
+            if(mark > 0 && mark_ready == 0) { 
+                mark_ready++;
+                printf "%s\nJAVA_OPTS=\"-javaagent:%s ${JAVA_OPTS}\"\n", $0, JAVA_AGENT_OPT;
+            } else if(mark > 0 && mark_NR == 1) {
+                mark=0
+            } else {
+                print
+            }
+        }
+        END{if(mark_ready==0){ printf "export JAVA_OPTS=\"-javaagent:%s ${JAVA_OPTS}\"\n", JAVA_AGENT_OPT }}
+        ' ${_tmp_root}.bak > ${_tmp_root}
         print_success "\`${_tmp_root}\` patched"
     done
 }
@@ -144,9 +191,27 @@ function init_tomcat_config() {
     backup_check ${_tmp_root}
 
     print_info "\`${_tmp_root}\` patching"
-    awk -v proxyName=${2} -v proxyPort=${3} \
-    'BEGIN{ mark_comment=0; mark_connector=0; mark_proxy_connector=0; connector_config="" }/<!--/{ mark_comment++ }/<Connector/{ mark_connector++; mark_proxy_connector=0; connector_config="" }/scheme="http"/{ mark_proxy_connector++ }/proxyName=/{ mark_proxy_connector++; gsub(/proxyName="[^"]*"/, sprintf("proxyName=\"%s\"", proxyName)) }/proxyPort=/{ mark_proxy_connector++; gsub(/proxyPort="[^"]*"/, sprintf("proxyPort=\"%d\"", proxyPort)) }{if(mark_comment==0 && mark_connector==0){ print }else if(mark_connector>0){ connector_config=sprintf("%s\n%s", connector_config, $0) }}/\/>/{if(mark_connector>0 && mark_proxy_connector==3){ print connector_config } if(mark_connector>0){ mark_connector-- }}/-->/{ mark_comment-- }END{}' \
-    ${_tmp_root}.bak > ${_tmp_root}
+    awk -v proxyName=${2} -v proxyPort=${3} '
+    BEGIN{ mark_comment=0; mark_connector=0; mark_proxy_connector=0; connector_config="" }
+    /<!--/{ mark_comment++ }
+    /<Connector/{ mark_connector++; mark_proxy_connector=0; connector_config="" }
+    /scheme="http"/{ mark_proxy_connector++ }
+    /proxyName=/{ mark_proxy_connector++; gsub(/proxyName="[^"]*"/, sprintf("proxyName=\"%s\"", proxyName)) }
+    /proxyPort=/{ mark_proxy_connector++; gsub(/proxyPort="[^"]*"/, sprintf("proxyPort=\"%d\"", proxyPort)) }
+    {
+        if(mark_comment == 0 && mark_connector == 0) {
+            print
+        } else if(mark_connector > 0) {
+            connector_config=sprintf("%s\n%s", connector_config, $0)
+        }
+    }
+    /\/>/{
+        if(mark_connector > 0 && mark_proxy_connector == 3){ print connector_config } 
+        if(mark_connector > 0){ mark_connector-- }
+    }
+    /-->/{ mark_comment-- }
+    END{}
+    ' ${_tmp_root}.bak > ${_tmp_root}
     print_success "\`${_tmp_root}\` patched"
 }
 
@@ -165,9 +230,19 @@ function init_bitbucket_properties() {
     backup_check ${_tmp_root} true
 
     print_info "\`${_tmp_root}\` patching"
-    awk -v proxy_name=${SUBDOMAIN_BITBUCKET} -v proxy_port=${SUBDOMAIN_BITBUCKET_PORT} \
-    'BEGIN{ mark=0; mark_blank=0 }/^$/{mark_blank++; if(mark_blank>0){ mark++ }}/#proxy server setting/{ mark++ }/server.port=/{ mark++ }/server.secure=/{ mark++ }/server.scheme=/{ mark++ }/server.proxy-port=/{ mark++ }/server.proxy-name=/{ mark++ }{if(mark==0){ print }else{ mark-- }}END{printf("\n#proxy server setting\nserver.port=%d\nserver.secure=%s\nserver.scheme=%s\nserver.proxy-port=%d\nserver.proxy-name=%s\nplugin.auth-crowd.sso.enabled=%s\n", 7990, "false", "http", proxy_port, proxy_name, "true")}' \
-    ${_tmp_root}.bak > ${_tmp_root}
+    awk -v proxy_name=${SUBDOMAIN_BITBUCKET} -v proxy_port=${SUBDOMAIN_BITBUCKET_PORT} '
+    BEGIN{ mark=0; mark_blank=0 }
+    /^$/{mark_blank++; if(mark_blank>0){ mark++ }}
+    /#proxy server setting/{ mark++ }
+    /server.port=/{ mark++ }
+    /server.secure=/{ mark++ }
+    /server.scheme=/{ mark++ }
+    /server.proxy-port=/{ mark++ }
+    /server.proxy-name=/{ mark++ }
+    /plugin.auth-crowd.sso.enabled=/{ mark++ }
+    {if(mark == 0){ print }else{ mark-- }}
+    END{ printf("\n#proxy server setting\nserver.port=%d\nserver.secure=%s\nserver.scheme=%s\nserver.proxy-port=%d\nserver.proxy-name=%s\nplugin.auth-crowd.sso.enabled=%s\n", 7990, "false", "http", proxy_port, proxy_name, "true") }
+    ' ${_tmp_root}.bak > ${_tmp_root}
     print_success "\`${_tmp_root}\` patched"
 }
 
@@ -183,19 +258,19 @@ function init_bitbucket() {
         _tmp_list=(`ls ${_software_root}`)
         if [[ ${#_tmp_list[@]} == 1 ]]; then
             _software_root=${_software_root}/${_tmp_list[0]}
-            print_warning "default bitbucket not found, auto switch to \`${_software_root}\`"
+            print_warning "default bitbucket version \`${BITBUCKET_VERSION}\` not found, auto switch to \`${_software_root}\`"
         else
             print_info "Please bitbucket version to continue: "
             select _key in ${_tmp_list[@]}; do
-                _software_root=${_software_root}/${_key}
+                BITBUCKET_VERSION=${_key}
                 break
             done
         fi
-    else
-        _software_root=${_software_root}/${BITBUCKET_VERSION}
     fi
 
-    print_info "Init bitbucket"
+    _software_root=${_software_root}/${BITBUCKET_VERSION}
+
+    print_info "Init bitbucket version \`${BITBUCKET_VERSION}\`"
     init_java_agent ${_software_root}
     init_bitbucket_properties ${RUNTIME_DATA_ROOT}/bitbucket/shared
     print_success "Inited bitbucket"
@@ -214,9 +289,19 @@ function init_crowd_tomcat() {
     backup_check ${_tmp_root}
 
     print_info "\`${_tmp_root}\` patching"
-    awk -v proxyName=${2} -v proxyPort=${3} \
-    'BEGIN{ mark=0; mark_count=0 }/<Connector/{ mark++; mark_count++; if(mark_count==1){ printf("%s scheme=\"http\" proxyName=\"%s\" proxyPort=\"%d\"\n", $0, proxyName, proxyPort) }else{ mark-- } }{if(mark==0){ print }else{ mark-- }}' \
-    ${_tmp_root}.bak > ${_tmp_root}
+    awk -v proxyName=${2} -v proxyPort=${3} '
+    BEGIN{ mark=0; mark_count=0 }
+    /<Connector/{ 
+        mark++;
+        mark_count++;
+        if(mark_count == 1) { 
+            printf("%s scheme=\"http\" proxyName=\"%s\" proxyPort=\"%d\"\n", $0, proxyName, proxyPort) 
+        } else {
+            mark--
+        }
+    }
+    {if(mark == 0){ print }else{ mark-- }}
+    ' ${_tmp_root}.bak > ${_tmp_root}
     print_success "\`${_tmp_root}\` patched"
 }
 
@@ -231,16 +316,25 @@ function init_crowd_properties() {
     backup_check ${_tmp_root}
 
     print_info "\`${_tmp_root}\` patching"
-    awk -v CROWD_HOME=${RUNTIME_DATA_ROOT}/crowd \
-    'BEGIN{ mark=0 }/crowd.home=/{ mark++ }{if(mark==0){ print }else if(mark!=2){ print }else{ printf("crowd.home=%s\n", CROWD_HOME) }}' \
-    ${_tmp_root}.bak > ${_tmp_root}
+    awk -v CROWD_HOME=${RUNTIME_DATA_ROOT}/crowd '
+    BEGIN{ mark=0 }
+    /crowd.home=/{ mark++ }
+    {
+        if(mark == 0) {
+            print
+        } else if(mark != 2) {
+            print
+        } else {
+            printf("crowd.home=%s\n", CROWD_HOME)
+        }
+    }
+    ' ${_tmp_root}.bak > ${_tmp_root}
     print_success "\`${_tmp_root}\` patched"
 }
 
 function init_crowd_sso() {
     # ${1} crowd path
-    # seraph-config.xml
-    # /opt/atlassian/jira/atlassian-jira/WEB-INF/classes
+    # /opt/atlassian/jira/atlassian-jira/WEB-INF/classes -> seraph-config.xml
     _tmp_root=${1}/client/conf/crowd.properties
     
     if [[ ! -f ${_tmp_root} ]]; then
@@ -279,10 +373,49 @@ function init_crowd_sso() {
 
         backup_check ${_tmp_software_root}
         print_info "\`${_tmp_software_root}\` seraph-config patching"
-        awk \
-        'BEGIN{ mark=0; mark_target=0; mark_NR=0; tmp_str="" }/<!--/{ mark_comment++ }/<authenticator/{ mark_target++ }/SSO/{if(mark_target>0){ mark_target++; tmp_str=$0; gsub(/<!--\s*/, "", tmp_str); gsub(/\s*-->/, "", tmp_str) }}{if(mark_comment==0 && mark_target==0){ print }else if(mark_target==2){ mark_target=0; print tmp_str }}/-->/{if(mark_comment>0){ mark_comment--; mark_target=0 }}' \
-        ${_tmp_software_root}.bak > ${_tmp_software_root}
+        awk '
+        BEGIN{ mark=0; mark_target=0; mark_NR=0; tmp_str="" }
+        /<!--/{ mark_comment++ }
+        /<authenticator/{ mark_target++ }
+        /SSO/{
+            if(mark_target > 0){
+                mark_target++; 
+                tmp_str=$0; 
+                gsub(/<!--\s*/, "", tmp_str); 
+                gsub(/\s*-->/, "", tmp_str) 
+            }
+        }
+        {
+            if(mark_comment == 0 && mark_target == 0) {
+                print
+            } else if(mark_target == 2) {
+                mark_target=0; 
+                print tmp_str 
+            }
+        }
+        /-->/{if(mark_comment > 0){ mark_comment--; mark_target=0 }}
+        ' ${_tmp_software_root}.bak > ${_tmp_software_root}
         print_info "\`${_tmp_software_root}\` seraph-config patching"
+    done
+}
+
+function init_crowd_runtime() {
+    # ${1} crowd path
+    _tmp_list=(
+        start_crowd.sh
+        stop_crowd.sh
+    )
+
+    _jre_home=`get_target_path ${INSTALL_ROOT} jre`
+
+    print_success "detect JRE_HOME = \`${_jre_home}\`"
+
+    for v in ${_tmp_list[@]}; do
+        _tmp_root=${1}/${v}
+        print_info "${_tmp_root} patching"
+        sed -ri "/^#!\/bin\/sh.*$/{n;/^export JRE_HOME.*$/d}" ${_tmp_root}
+        sed -ri "s/(^#!\/bin\/sh.*$)/\\1\nexport JRE_HOME=${_jre_home//\//\\/}/" ${_tmp_root}
+        print_info "${_tmp_root} patched"
     done
 }
 
@@ -298,6 +431,7 @@ function init_crowd() {
     init_crowd_tomcat ${_software_root}/apache-tomcat ${SUBDOMAIN_CROWD} ${SUBDOMAIN_CROWD_PORT}
     init_crowd_properties ${_software_root}
     init_crowd_sso ${_software_root}
+    init_crowd_runtime ${_software_root}
     print_success "Inited crowd"
 }
 
@@ -334,6 +468,40 @@ function init_jira() {
 }
 
 # ====================================
+# lic generator
+
+function generate_lic() {
+    # detect jre env    
+    _jre_java=`get_target_path ${INSTALL_ROOT} java`
+
+    print_info "please select which product to process"
+    _tmp_list=(
+        jira
+        crowd
+        bitbucket
+        confluence
+    )
+
+    select _v in ${_tmp_list[@]}; do
+        case ${_v} in
+            confluence)
+                _v=conf
+            ;;
+        esac
+
+        read -p "please input serial number : " _tmp_serial
+        ${_jre_java} -jar ${JAVA_AGENT_OPT} \
+        -p ${_v} \
+        -m noreply@${MAIN_DOMAIN} \
+        -n my_name \
+        -o https://${MAIN_DOMAIN} \
+        -s ${_tmp_serial}
+        break
+    done
+}
+
+
+# ====================================
 # install
 
 function install() {
@@ -345,4 +513,4 @@ function install() {
     print_success "Install Ready"
 }
 
-install
+parse_run_method
